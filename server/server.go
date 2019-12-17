@@ -27,6 +27,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/saracen/lfscache/cache"
+	//"github.com/bmizerany/pat"
 )
 
 // BatchResponse represents a batch response payload.
@@ -42,7 +43,8 @@ type BatchObjectResponse struct {
 	OID           string                                `json:"oid"`
 	Size          int64                                 `json:"size"`
 	Authenticated bool                                  `json:"authenticated,omitempty"`
-	Actions       map[string]*BatchObjectActionResponse `json:"actions"`
+	//Actions       map[string]*BatchObjectActionResponse `json:"actions,omitempty"`
+	Actions       map[string]*BatchObjectActionResponse `json:"_links,omitempty"`
 }
 
 // BatchObjectActionResponse is the action item of a BatchObjectResponse
@@ -51,6 +53,18 @@ type BatchObjectActionResponse struct {
 	Header    map[string]string `json:"header,omitempty"`
 	ExpiresIn int               `json:"expires_in,omitempty"`
 	ExpiresAt time.Time         `json:"expires_at,omitempty"`
+}
+
+type ReqObj struct {
+	OID	string		`json:"oid"`
+	Size	int		`json:size"`
+}
+
+type ReqBody struct {
+	Op	string			`json:"operation"`
+	Trans	[]string		`json:"transfers,omitempty"`
+	Ref	string			`json:ref,omitempty"`
+	Objects	[]ReqObj		`json:"objects"`
 }
 
 const (
@@ -82,6 +96,7 @@ type originalHost struct {
 }
 
 func DefaultObjectBatchActionURLRewriter(href *url.URL) *url.URL {
+	fmt.Print("DOBAUR  ", href, "\n" )
 	return href
 }
 
@@ -90,11 +105,13 @@ type Server struct {
 	logger   log.Logger
 	upstream *url.URL
 	mux      *http.ServeMux
+//	mux		*pat.PatternServeMux
 	cache    *cache.FilesystemCache
 	client   *http.Client
 	hmacKey  [64]byte
 
 	ObjectBatchActionURLRewriter func(href *url.URL) *url.URL
+	repoarray map[string]*url.URL
 }
 
 // New returns a new LFS proxy caching server.
@@ -105,6 +122,26 @@ func New(logger log.Logger, upstream, directory string) (*Server, error) {
 // NewNoCache returns a new LFS proxy server, with no caching.
 func NewNoCache(logger log.Logger, upstream string) (*Server, error) {
 	return newServer(logger, upstream, "", false)
+}
+
+func fakeconf() map[string]*url.URL {
+	ary := make(map[string]*url.URL)
+	addr, err := url.Parse("https://af01p-ir.devtools.intel.com/artifactory/api/lfs/movidius_vpu_ip2_git_lfs_store-ir-local/")
+	if err != nil {
+
+	}
+	ary["vpuip_2"] = addr
+	addr, err = url.Parse("https://af01p-ir.devtools.intel.com/artifactory/api/lfs/movidius-mig-core-ir-local/")
+	if err != nil {
+
+	}
+	ary["migNetworkZoo"] = addr
+	return ary
+}
+
+func tstproxy(req *http.Request) (*url.URL, error) {
+	fmt.Print("TSTPXY", req.URL)
+	return req.URL, nil
 }
 
 func newServer(logger log.Logger, upstream, directory string, cacheEnabled bool) (*Server, error) {
@@ -138,15 +175,15 @@ func newServer(logger log.Logger, upstream, directory string, cacheEnabled bool)
 	if err != nil {
 		return nil, err
 	}
-
-	if s.upstream, err = url.Parse(upstream); err != nil {
+	var repo *url.URL
+	if repo, err = url.Parse(upstream); err != nil {
 		return nil, err
 	}
-
-	// ensure upstream path has suffixed separator
-	if !strings.HasSuffix(s.upstream.Path, "/") {
-		s.upstream.Path += "/"
+	if !strings.HasSuffix(repo.Path, "/") {
+		repo.Path += "/"
 	}
+	s.repoarray = fakeconf() //append(s.repoarray, repoEntry {repo: "vpuip_2", url: upstream})
+	s.upstream = repo
 
 	s.mux = http.NewServeMux()
 	if s.cache != nil {
@@ -171,26 +208,50 @@ func (s *Server) Handle() http.Handler {
 }
 
 func (s *Server) proxy() *httputil.ReverseProxy {
+	//fmt.Print("PROXY\n")
 	director := func(req *http.Request) {
+		//repo := strings.Split(req.URL.Path[1:],"/")
+		//dir := "/" + strings.Join(repo[1:], "/")
+		//req.URL.Path = dir
 		outreq := req.WithContext(context.WithValue(req.Context(), contextKeyOriginalHost, &originalHost{
 			http: req.TLS == nil,
+			//http: false,
 			host: req.Host,
 		}))
 		*req = *outreq
 
 		req.URL.Path = strings.TrimLeft(req.URL.Path, "/")
+//		upstream := s.repoarray[repo[0]] 
+//		fmt.Print(upstream)
 		req.URL = s.upstream.ResolveReference(req.URL)
 		req.Host = req.URL.Host
-
+		//fmt.Print("PXY URL ", req.URL, "\n")
 		if _, ok := req.Header["User-Agent"]; !ok {
 			req.Header.Set("User-Agent", "")
 		}
+
+		//body, err := req.GetBody()
+		//b, err := ioutil.ReadAll(body)
+		//if err != nil {
+		//	return
+		//}
+		//var msg ReqBody
+		//err = json.Unmarshal(b, &msg)
+
+		fmt.Print("EPROXY ", req.URL, req.Header, "\n" )
+		//req.Body.Close()
+
 	}
 
 	errorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		level.Error(s.logger).Log("event", "proxying", "request", r.URL, "err", err)
 	}
 
+	//modifyResp := func(r *http.Response) error {
+	//	fmt.Print("ZOT", r.Status, "\n")
+	//	return nil
+	//}
+	//return &httputil.ReverseProxy{Director: director, ModifyResponse: modifyResp, ErrorHandler: errorHandler}
 	return &httputil.ReverseProxy{Director: director, ErrorHandler: errorHandler}
 }
 
@@ -198,8 +259,13 @@ func (s *Server) batch() *httputil.ReverseProxy {
 	proxy := s.proxy()
 	proxy.ModifyResponse = func(r *http.Response) error {
 		if r.StatusCode != http.StatusOK {
-			level.Error(s.logger).Log("event", "proxying", "request", r.Request.URL, "err", fmt.Sprintf("remote server responded with %d status code", r.StatusCode))
-			return nil
+			if r.StatusCode == http.StatusUnauthorized {
+				fmt.Print("***401 ",r.Header, "\n")
+				return nil
+			} else {
+				level.Error(s.logger).Log("event", "proxying", "request", r.Request.URL, "err", fmt.Sprintf("remote server BAD with %d status code", r.StatusCode))
+				return nil
+			}
 		}
 
 		var err error
@@ -215,18 +281,21 @@ func (s *Server) batch() *httputil.ReverseProxy {
 		if err = json.NewDecoder(r.Body).Decode(&br); err != nil {
 			return err
 		}
-
 		// only support basic transfers
 		if br.Transfer != "" && br.Transfer != "basic" {
 			return s.batchResponse(&br, compress, r)
 		}
+		fmt.Print("BR", br, br.Objects[0], "\n")
 
 		// modify batch request urls
 		for _, object := range br.Objects {
+			//fmt.Print("OP0", object.Actions)
 			for operation, action := range object.Actions {
+				//fmt.Print("OP1",operation, action, "\n")
 				if operation != "download" && s.cache != nil {
 					continue
 				}
+				//fmt.Print("OP2")
 				if action.Header == nil {
 					action.Header = make(map[string]string)
 				}
@@ -272,6 +341,8 @@ func (s *Server) batch() *httputil.ReverseProxy {
 
 func (s *Server) batchResponse(br *BatchResponse, compress bool, r *http.Response) error {
 	var err error
+
+	fmt.Print("BATCHRESP ", r, "\n")
 	if err = r.Body.Close(); err != nil {
 		return err
 	}
@@ -300,6 +371,10 @@ func (s *Server) batchResponse(br *BatchResponse, compress bool, r *http.Respons
 
 func (s *Server) nocache() *httputil.ReverseProxy {
 	director := func(req *http.Request) {
+//		repo := strings.Split(req.URL.Path[1:],"/")
+//		dir := "/" + strings.Join(repo[1:], "/")
+//		req.URL.Path = dir
+
 		addr, _, header, err := s.parseHeaders(req)
 		if err != nil {
 			return
@@ -323,6 +398,11 @@ func (s *Server) nocache() *httputil.ReverseProxy {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	fmt.Print("SERVE  ", r.URL.Path, "\n")
+//	repo := strings.Split(r.URL.Path[1:],"/")
+//	dir := "/" + strings.Join(repo[1:], "/")
+//	r.URL.Path = dir
+	
 	url, size, header, err := s.parseHeaders(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -358,6 +438,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) parseHeaders(r *http.Request) (url string, size int, header http.Header, err error) {
+	fmt.Print("pH ", r.URL.Path)
 	// check header is valid
 	signature, err := hex.DecodeString(r.Header.Get(SignatureHeader))
 	if err != nil {
