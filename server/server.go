@@ -126,12 +126,12 @@ func NewNoCache(logger log.Logger, upstream string) (*Server, error) {
 
 func fakeconf() map[string]*url.URL {
 	ary := make(map[string]*url.URL)
-	addr, err := url.Parse("https://af01p-ir.devtools.intel.com/artifactory/api/lfs/movidius_vpu_ip2_git_lfs_store-ir-local/")
+	addr, err := url.Parse("SOME ARTIFACTORY")
 	if err != nil {
 
 	}
 	ary["vpuip_2"] = addr
-	addr, err = url.Parse("https://af01p-ir.devtools.intel.com/artifactory/api/lfs/movidius-mig-core-ir-local/")
+	addr, err = url.Parse("SOME ARTIFACT")
 	if err != nil {
 
 	}
